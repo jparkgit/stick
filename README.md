@@ -68,7 +68,13 @@ cd stick
 ./scripts/build-app.sh
 ```
 
-The app and release downloads are created at:
+To build and install your local checkout to `~/Applications` in one step (quits and relaunches Stick, and skips the zip/DMG), run:
+
+```bash
+./scripts/install-local.sh
+```
+
+`build-app.sh` creates the app and release downloads at:
 
 ```text
 dist/Stick.app

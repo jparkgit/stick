@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --app-only: build just dist/Stick.app and skip the zip/DMG (used by
+# scripts/install-local.sh so the tracked dist/ downloads stay untouched).
+APP_ONLY=0
+if [[ "${1:-}" == "--app-only" ]]; then
+  APP_ONLY=1
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="Stick"
 EXECUTABLE_NAME="StickyNotes"
@@ -17,7 +24,11 @@ RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
 cd "$ROOT_DIR"
 
-rm -rf "$APP_DIR" "$DMG_STAGING_DIR" "$DIST_DIR/$APP_NAME.zip" "$DMG_RW" "$DMG_FINAL"
+if [[ $APP_ONLY == 1 ]]; then
+  rm -rf "$APP_DIR"
+else
+  rm -rf "$APP_DIR" "$DMG_STAGING_DIR" "$DIST_DIR/$APP_NAME.zip" "$DMG_RW" "$DMG_FINAL"
+fi
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 swift build -c release
@@ -60,6 +71,11 @@ PLIST
 chmod +x "$MACOS_DIR/$APP_NAME"
 
 codesign --force --deep --sign - "$APP_DIR"
+
+if [[ $APP_ONLY == 1 ]]; then
+  echo "Built $APP_DIR"
+  exit 0
+fi
 
 (
   cd "$DIST_DIR"

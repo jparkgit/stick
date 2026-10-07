@@ -12,6 +12,7 @@ Stick is a native macOS sticky-notes app (SwiftUI + AppKit, no dependencies). It
 swift build                 # debug build
 swift run StickyNotes       # run the bare executable (no .app bundle, no icon/Info.plist)
 ./scripts/build-app.sh      # release build → dist/Stick.app, dist/Stick.zip, dist/Stick.dmg
+./scripts/install-local.sh  # build dist/Stick.app only (--app-only), install to ~/Applications, relaunch
 ```
 
 - There are no tests, linter, or formatter configured.
