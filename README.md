@@ -42,6 +42,12 @@ xattr -dr com.apple.quarantine /Applications/Stick.app
 
 After that, it opens normally. (The old "right-click → Open" trick no longer works for unsigned apps on macOS Sequoia and later — use the command above instead.)
 
+## Markdown
+
+Notes are written in Markdown, including GitHub-style extras: **bold**, *italic*, ~~strikethrough~~, `code`, links, headings, lists, task lists (`- [ ]` / `- [x]`), tables, blockquotes, and fenced code blocks.
+
+A note shows its rendered view until you click into it to edit the raw text. Click away (or use the pencil/eye button in the note's title bar) to see it rendered again. Task checkboxes can be ticked directly in the rendered view.
+
 ## Notes Storage
 
 Stick saves notes as JSON in your Application Support folder. The dashboard shows the exact path and can reveal it in Finder.

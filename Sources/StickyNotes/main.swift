@@ -131,15 +131,430 @@ struct FrostedBackground: View {
     }
 }
 
+// MARK: - Markdown
+
+/// One rendered block of a note. Notes are always stored as raw Markdown;
+/// blocks are derived on the fly for the preview and never persisted.
+struct MDBlock: Identifiable {
+    enum ListMarker {
+        case bullet
+        case ordered(String)
+        /// `line` is the source line index, so the checkbox can be toggled in place.
+        case task(checked: Bool, line: Int)
+
+        var isChecked: Bool {
+            if case .task(true, _) = self { return true }
+            return false
+        }
+    }
+
+    enum ColumnAlignment {
+        case leading, center, trailing
+
+        var frame: Alignment {
+            switch self {
+            case .leading: return .leading
+            case .center: return .center
+            case .trailing: return .trailing
+            }
+        }
+
+        var text: TextAlignment {
+            switch self {
+            case .leading: return .leading
+            case .center: return .center
+            case .trailing: return .trailing
+            }
+        }
+    }
+
+    enum Kind {
+        case heading(level: Int, text: String)
+        case paragraph(String)
+        case listItem(indent: Int, marker: ListMarker, text: String)
+        case quote(String)
+        case code(String)
+        case table(header: [String], alignments: [ColumnAlignment], rows: [[String]])
+        case rule
+    }
+
+    let id: Int
+    let kind: Kind
+
+    var isListItem: Bool {
+        if case .listItem = kind { return true }
+        return false
+    }
+}
+
+/// Small line-based GFM block parser. Inline formatting (bold, italic,
+/// ~~strikethrough~~, `code`, links) is delegated to Foundation's built-in
+/// Markdown support, which keeps the app dependency-free.
+enum MarkdownParser {
+    struct ListItem {
+        let indent: Int
+        let ordered: String?
+        /// Character offset of the space / `x` inside `[ ]`, for task items.
+        let checkboxOffset: Int?
+        let checked: Bool
+        let content: String
+    }
+
+    static func parse(_ text: String) -> [MDBlock] {
+        let lines = text.components(separatedBy: "\n").map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
+        var blocks: [MDBlock] = []
+        func add(_ kind: MDBlock.Kind) { blocks.append(MDBlock(id: blocks.count, kind: kind)) }
+
+        func isTableStart(_ j: Int) -> Bool {
+            lines[j].contains("|") && j + 1 < lines.count && tableAlignments(lines[j + 1]) != nil
+        }
+        func startsBlock(_ j: Int) -> Bool {
+            let t = lines[j].trimmingCharacters(in: .whitespaces)
+            return t.hasPrefix("```") || t.hasPrefix("~~~") || heading(t) != nil || isRule(t)
+                || t.hasPrefix(">") || listItem(lines[j]) != nil || isTableStart(j)
+        }
+
+        var i = 0
+        while i < lines.count {
+            let line = lines[i]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { i += 1; continue }
+
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                let fence = String(trimmed.prefix(3))
+                var code: [String] = []
+                i += 1
+                while i < lines.count, !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix(fence) {
+                    code.append(lines[i])
+                    i += 1
+                }
+                i += 1 // closing fence (an unclosed fence runs to the end)
+                add(.code(code.joined(separator: "\n")))
+                continue
+            }
+
+            if let h = heading(trimmed) {
+                add(.heading(level: h.level, text: h.text))
+                i += 1
+                continue
+            }
+
+            if isRule(trimmed) {
+                add(.rule)
+                i += 1
+                continue
+            }
+
+            if isTableStart(i), let alignments = tableAlignments(lines[i + 1]) {
+                let header = tableCells(trimmed)
+                if header.count == alignments.count {
+                    var rows: [[String]] = []
+                    i += 2
+                    while i < lines.count {
+                        let t = lines[i].trimmingCharacters(in: .whitespaces)
+                        guard !t.isEmpty, t.contains("|") else { break }
+                        var cells = tableCells(t)
+                        if cells.count < header.count {
+                            cells += Array(repeating: "", count: header.count - cells.count)
+                        }
+                        rows.append(Array(cells.prefix(header.count)))
+                        i += 1
+                    }
+                    add(.table(header: header, alignments: alignments, rows: rows))
+                    continue
+                }
+            }
+
+            if trimmed.hasPrefix(">") {
+                var quote: [String] = []
+                while i < lines.count {
+                    let t = lines[i].trimmingCharacters(in: .whitespaces)
+                    guard t.hasPrefix(">") else { break }
+                    var rest = t.dropFirst()
+                    if rest.hasPrefix(" ") { rest = rest.dropFirst() }
+                    quote.append(String(rest))
+                    i += 1
+                }
+                add(.quote(quote.joined(separator: "\n")))
+                continue
+            }
+
+            if let item = listItem(line) {
+                let marker: MDBlock.ListMarker
+                if item.checkboxOffset != nil {
+                    marker = .task(checked: item.checked, line: i)
+                } else if let label = item.ordered {
+                    marker = .ordered(label)
+                } else {
+                    marker = .bullet
+                }
+                add(.listItem(indent: item.indent, marker: marker, text: item.content))
+                i += 1
+                continue
+            }
+
+            // Paragraph: line breaks are kept as typed, which suits short notes
+            // better than CommonMark's soft-wrap joining.
+            var para = [trimmed]
+            i += 1
+            while i < lines.count {
+                let t = lines[i].trimmingCharacters(in: .whitespaces)
+                if t.isEmpty || startsBlock(i) { break }
+                para.append(t)
+                i += 1
+            }
+            add(.paragraph(para.joined(separator: "\n")))
+        }
+        return blocks
+    }
+
+    /// Flips `[ ]` ↔ `[x]` on the given source line, leaving everything else untouched.
+    static func toggleTask(in text: String, line: Int) -> String {
+        var lines = text.components(separatedBy: "\n")
+        guard lines.indices.contains(line) else { return text }
+        var raw = lines[line]
+        let hadCR = raw.hasSuffix("\r")
+        if hadCR { raw.removeLast() } // match parse(), which strips CRLF endings
+        guard let item = listItem(raw), let offset = item.checkboxOffset else { return text }
+        var chars = Array(raw)
+        chars[offset] = item.checked ? " " : "x"
+        lines[line] = String(chars) + (hadCR ? "\r" : "")
+        return lines.joined(separator: "\n")
+    }
+
+    static func inline(_ s: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: s, options: options)) ?? AttributedString(s)
+    }
+
+    static func listItem(_ line: String) -> ListItem? {
+        let chars = Array(line)
+        var i = 0
+        var indent = 0
+        while i < chars.count, chars[i] == " " || chars[i] == "\t" {
+            indent += chars[i] == "\t" ? 4 : 1
+            i += 1
+        }
+        guard i < chars.count else { return nil }
+
+        var ordered: String? = nil
+        if "-*+".contains(chars[i]) {
+            i += 1
+        } else if chars[i].isASCII, chars[i].isNumber {
+            var j = i
+            while j < chars.count, chars[j].isASCII, chars[j].isNumber { j += 1 }
+            guard j < chars.count, j - i <= 9, chars[j] == "." || chars[j] == ")" else { return nil }
+            ordered = String(chars[i...j])
+            i = j + 1
+        } else {
+            return nil
+        }
+
+        // The marker must be followed by whitespace (or end the line).
+        if i < chars.count {
+            guard chars[i] == " " || chars[i] == "\t" else { return nil }
+            while i < chars.count, chars[i] == " " || chars[i] == "\t" { i += 1 }
+        }
+
+        var checkboxOffset: Int? = nil
+        var checked = false
+        if i + 2 < chars.count, chars[i] == "[", chars[i + 2] == "]", " xX".contains(chars[i + 1]),
+           i + 3 == chars.count || chars[i + 3] == " " {
+            checkboxOffset = i + 1
+            checked = chars[i + 1] != " "
+            i += 3
+        }
+
+        let content = String(chars[min(i, chars.count)...]).trimmingCharacters(in: .whitespaces)
+        return ListItem(indent: indent, ordered: ordered, checkboxOffset: checkboxOffset, checked: checked, content: content)
+    }
+
+    static func heading(_ t: String) -> (level: Int, text: String)? {
+        let level = t.prefix(while: { $0 == "#" }).count
+        guard (1...6).contains(level) else { return nil }
+        let rest = t.dropFirst(level)
+        guard rest.isEmpty || rest.first == " " else { return nil }
+        return (level, rest.trimmingCharacters(in: .whitespaces))
+    }
+
+    static func isRule(_ t: String) -> Bool {
+        let s = t.replacingOccurrences(of: " ", with: "")
+        guard let first = s.first, "-*_".contains(first), s.count >= 3 else { return false }
+        return s.allSatisfy { $0 == first }
+    }
+
+    static func tableAlignments(_ line: String) -> [MDBlock.ColumnAlignment]? {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard t.contains("|"), t.contains("-") else { return nil }
+        var result: [MDBlock.ColumnAlignment] = []
+        for cell in tableCells(t) {
+            let left = cell.hasPrefix(":"), right = cell.hasSuffix(":")
+            let dashes = cell.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+            guard !dashes.isEmpty, dashes.allSatisfy({ $0 == "-" }) else { return nil }
+            result.append(left && right ? .center : right ? .trailing : .leading)
+        }
+        return result
+    }
+
+    /// Splits a table row on unescaped pipes, dropping the optional outer pipes.
+    static func tableCells(_ t: String) -> [String] {
+        var s = Substring(t)
+        if s.hasPrefix("|") { s = s.dropFirst() }
+        if s.hasSuffix("|") && !s.hasSuffix("\\|") { s = s.dropLast() }
+        var cells: [String] = []
+        var current = ""
+        var previous: Character? = nil
+        for ch in s {
+            if ch == "|" && previous != "\\" {
+                cells.append(current)
+                current = ""
+            } else if ch == "|" {
+                current.removeLast() // drop the escaping backslash
+                current.append(ch)
+            } else {
+                current.append(ch)
+            }
+            previous = ch
+        }
+        cells.append(current)
+        return cells.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+}
+
+struct MarkdownView: View {
+    let text: String
+    let fontSize: CGFloat
+    let fontColor: Color
+    let onToggleTask: (Int) -> Void
+
+    var body: some View {
+        let blocks = MarkdownParser.parse(text)
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(blocks) { block in
+                blockView(block.kind)
+                    .padding(.top, topSpacing(blocks, block.id))
+            }
+        }
+        .font(.system(size: fontSize, design: .rounded))
+        .foregroundColor(fontColor)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Consecutive list items sit tight together; everything else gets a paragraph gap.
+    private func topSpacing(_ blocks: [MDBlock], _ i: Int) -> CGFloat {
+        guard i > 0 else { return 0 }
+        return blocks[i].isListItem && blocks[i - 1].isListItem ? fontSize * 0.25 : fontSize * 0.6
+    }
+
+    private func inline(_ s: String) -> Text {
+        Text(MarkdownParser.inline(s))
+    }
+
+    private static func headingScale(_ level: Int) -> CGFloat {
+        switch level {
+        case 1: return 1.6
+        case 2: return 1.35
+        case 3: return 1.15
+        default: return 1.0
+        }
+    }
+
+    @ViewBuilder
+    private func blockView(_ kind: MDBlock.Kind) -> some View {
+        switch kind {
+        case .heading(let level, let text):
+            inline(text)
+                .font(.system(size: fontSize * Self.headingScale(level), weight: level <= 2 ? .bold : .semibold, design: .rounded))
+        case .paragraph(let text):
+            inline(text)
+        case .listItem(let indent, let marker, let text):
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                switch marker {
+                case .bullet:
+                    Text("•")
+                case .ordered(let label):
+                    Text(label).monospacedDigit()
+                case .task(let checked, let line):
+                    Button { onToggleTask(line) } label: {
+                        Image(systemName: checked ? "checkmark.square.fill" : "square")
+                            .font(.system(size: fontSize))
+                    }
+                    .buttonStyle(.plain)
+                }
+                inline(text)
+                    .opacity(marker.isChecked ? 0.55 : 1)
+            }
+            .padding(.leading, CGFloat(indent) * fontSize * 0.5)
+        case .quote(let text):
+            inline(text)
+                .opacity(0.8)
+                .padding(.leading, 11)
+                .overlay(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(fontColor.opacity(0.4))
+                        .frame(width: 3)
+                }
+        case .code(let code):
+            Text(code)
+                .font(.system(size: fontSize * 0.9, design: .monospaced))
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(fontColor.opacity(0.12))
+                )
+        case .table(let header, let alignments, let rows):
+            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+                GridRow {
+                    ForEach(header.indices, id: \.self) { col in
+                        tableCell(header[col], alignments[col], isHeader: true)
+                    }
+                }
+                ForEach(rows.indices, id: \.self) { r in
+                    GridRow {
+                        ForEach(rows[r].indices, id: \.self) { col in
+                            tableCell(rows[r][col], alignments[col], isHeader: false)
+                        }
+                    }
+                }
+            }
+            .overlay(Rectangle().stroke(fontColor.opacity(0.3), lineWidth: 1))
+        case .rule:
+            Rectangle()
+                .fill(fontColor.opacity(0.3))
+                .frame(height: 1)
+        }
+    }
+
+    private func tableCell(_ text: String, _ align: MDBlock.ColumnAlignment, isHeader: Bool) -> some View {
+        inline(text)
+            .fontWeight(isHeader ? .semibold : nil)
+            .multilineTextAlignment(align.text)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: align.frame)
+            .background(isHeader ? fontColor.opacity(0.12) : Color.clear)
+            .overlay(Rectangle().stroke(fontColor.opacity(0.2), lineWidth: 0.5))
+    }
+}
+
 // MARK: - Sticker view
+
+/// Per-window UI state shared between the AppKit window and its SwiftUI body.
+final class StickerUIState: ObservableObject {
+    @Published var editing: Bool
+    init(editing: Bool) { self.editing = editing }
+}
 
 struct StickerView: View {
     let id: UUID
     @ObservedObject var state: AppState
+    @ObservedObject var ui: StickerUIState
     let onClose: () -> Void
     let onDrag: () -> Void
     let onTogglePin: () -> Void
     @State private var hovering = false
+    @FocusState private var editorFocused: Bool
 
     private var text: Binding<String> {
         Binding(
@@ -153,6 +568,12 @@ struct StickerView: View {
     }
 
     private var isPinned: Bool { state.sticker(id)?.pinned ?? false }
+
+    private func toggleTask(_ line: Int) {
+        guard var s = state.sticker(id) else { return }
+        s.text = MarkdownParser.toggleTask(in: s.text, line: line)
+        state.upsert(s)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -173,6 +594,13 @@ struct StickerView: View {
                     }
                     .buttonStyle(.plain)
                     Spacer()
+                    Button(action: { ui.editing.toggle() }) {
+                        Image(systemName: ui.editing ? "eye" : "pencil")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.white.opacity(hovering ? 0.9 : 0.6))
+                            .help(ui.editing ? "Preview" : "Edit")
+                    }
+                    .buttonStyle(.plain)
                     Button(action: onTogglePin) {
                         Image(systemName: isPinned ? "pin.fill" : "pin")
                             .font(.system(size: 10, weight: .semibold))
@@ -189,12 +617,43 @@ struct StickerView: View {
                 DragGesture(minimumDistance: 0).onChanged { _ in onDrag() }
             )
 
-            // Body
-            TextEditor(text: text)
-                .font(.system(size: state.fontSize, design: .rounded))
-                .scrollContentBackground(.hidden)
-                .padding(10)
-                .foregroundColor(state.fontColor)
+            // Body — raw Markdown while editing, rendered preview otherwise.
+            Group {
+                if ui.editing {
+                    TextEditor(text: text)
+                        .font(.system(size: state.fontSize, design: .rounded))
+                        .scrollContentBackground(.hidden)
+                        .foregroundColor(state.fontColor)
+                        .focused($editorFocused)
+                        .onAppear { DispatchQueue.main.async { editorFocused = true } }
+                        .onChange(of: editorFocused) { _, focused in
+                            if !focused { ui.editing = false }
+                        }
+                        .onExitCommand { ui.editing = false }
+                } else {
+                    ScrollView {
+                        let markdown = text.wrappedValue
+                        if markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text("Click to write…")
+                                .font(.system(size: state.fontSize, design: .rounded))
+                                .foregroundColor(state.fontColor.opacity(0.45))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            MarkdownView(
+                                text: markdown,
+                                fontSize: state.fontSize,
+                                fontColor: state.fontColor,
+                                onToggleTask: toggleTask
+                            )
+                        }
+                    }
+                    // Line up with TextEditor's built-in text inset so toggling doesn't jump.
+                    .padding(.horizontal, 5)
+                    .contentShape(Rectangle())
+                    .onTapGesture { ui.editing = true }
+                }
+            }
+            .padding(10)
         }
         .background(FrostedBackground(state: state, cornerRadius: 14))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -221,9 +680,12 @@ struct StickerView: View {
 
 final class StickerWindow: NSWindow {
     let stickerID: UUID
+    let ui: StickerUIState
 
     init(data: StickerData, state: AppState, onClose: @escaping (UUID) -> Void, onTogglePin: @escaping (UUID) -> Void) {
         self.stickerID = data.id
+        // Empty notes open straight into the editor; others show the rendered preview.
+        self.ui = StickerUIState(editing: data.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         super.init(
             contentRect: NSRect(x: data.x, y: data.y, width: data.width, height: data.height),
             styleMask: [.titled, .resizable, .fullSizeContentView],
@@ -249,6 +711,7 @@ final class StickerWindow: NSWindow {
         let view = StickerView(
             id: id,
             state: state,
+            ui: ui,
             onClose: { onClose(id) },
             onDrag: { [weak self] in
                 guard let self, let event = NSApp.currentEvent else { return }
@@ -265,6 +728,13 @@ final class StickerWindow: NSWindow {
     // Keep Liquid Glass `.clear` from desaturating when another app takes
     // focus. Glass reads `isMainWindow` to decide active vs. inactive look.
     override var isMainWindow: Bool { true }
+
+    // Clicking away from a note (another note, the dashboard, another app)
+    // drops it back to the rendered Markdown preview.
+    override func resignKey() {
+        super.resignKey()
+        ui.editing = false
+    }
 
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
@@ -311,7 +781,18 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func layout() {
         super.layout()
         forceActiveVisualEffects(in: self)
+        disableSmartSubstitutions(in: self)
     }
+}
+
+// Smart dashes/quotes would turn `---` and `|---|` into em dashes and break
+// Markdown rules and tables, so the note editor keeps exactly what was typed.
+func disableSmartSubstitutions(in view: NSView) {
+    if let tv = view as? NSTextView {
+        if tv.isAutomaticDashSubstitutionEnabled { tv.isAutomaticDashSubstitutionEnabled = false }
+        if tv.isAutomaticQuoteSubstitutionEnabled { tv.isAutomaticQuoteSubstitutionEnabled = false }
+    }
+    for sub in view.subviews { disableSmartSubstitutions(in: sub) }
 }
 
 // Walk subview tree and force every NSVisualEffectView (including those the
