@@ -36,4 +36,4 @@ All app code lives in a single file, `Sources/StickyNotes/main.swift`, using top
 
 ## Workflow preferences
 
-- Never create a new git branch unless the user explicitly asks for one. Commit and push on the current branch.
+- Always commit and push directly to `main`. Never create a new git branch (including session or feature branches) unless the user explicitly asks for one.
