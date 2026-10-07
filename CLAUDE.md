@@ -31,3 +31,7 @@ All app code lives in a single file, `Sources/StickyNotes/main.swift`, using top
 - **`StickerWindow`** — a `.titled` + `.fullSizeContentView` window with hidden chrome, kept titled so system edge/corner resizing works. Dragging is done via `performDrag(with:)` from a SwiftUI `DragGesture` on the custom title bar. Pinning (`applyPinned`) toggles `.floating` level + `.canJoinAllSpaces`; the unpin path deliberately orders out and back to detach from fullscreen spaces. `isPinnedWindow` is derived from `level == .floating`.
 - **`DashboardWindow`** — borderless, movable-by-background window listing notes plus the `SettingsPanel` (appearance) and the storage path (click reveals in Finder).
 - **Liquid Glass workarounds** — both window classes override `isMainWindow` to `true`, and `FirstMouseHostingView` / `installActiveBlurFix` walk the view tree forcing `NSVisualEffectView.state = .active`, so glass doesn't render in its inactive/desaturated style when another app is focused. `FirstMouseHostingView.acceptsFirstMouse` lets a sticker be dragged on the first click without activating it first. Keep these in place when changing window code.
+
+## Workflow preferences
+
+- Never create a new git branch unless the user explicitly asks for one. Commit and push on the current branch.
